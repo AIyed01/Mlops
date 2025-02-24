@@ -1,0 +1,15 @@
+artifact_uri: mlflow-artifacts:/0/75e36fb3d9c744fe9e93100199f55f06/artifacts
+end_time: 1738837682435
+entry_point_name: ''
+experiment_id: '0'
+lifecycle_stage: active
+run_id: 75e36fb3d9c744fe9e93100199f55f06
+run_name: glamorous-duck-507
+run_uuid: 75e36fb3d9c744fe9e93100199f55f06
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1738837681067
+status: 3
+tags: []
+user_id: iyed
