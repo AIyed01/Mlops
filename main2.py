@@ -10,10 +10,36 @@ from model_pipeline import (
 import joblib
 import mlflow  # type: ignore
 import mlflow.sklearn  # type: ignore
-
-mlflow.set_tracking_uri("http://localhost:5000")
+from fastapi import FastAPI # type: ignore
+from pydantic import BaseModel  # type: ignore
+import uvicorn  # type: ignore
+import mlflow   # type: ignore
+MLFLOW_TRACKING_URI = "http://172.17.81.48:5000"
+mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 mlflow.set_experiment("XGBoost Experiment")
 
+app = FastAPI()
+from pydantic import BaseModel
+from typing import List
+
+class ModelInput(BaseModel):
+    feature_vector: List[float]  # Ensure feature vector contains numeric values
+
+
+@app.get("/")
+def home():
+    return {"message": "FastAPI is running!"}
+@app.post("/predict")
+def predict(data: ModelInput):
+    import joblib
+    try:
+        model = joblib.load("trained_model.pkl")  # Load trained model
+    except FileNotFoundError:
+        return {"error": "Model not found. Train it first!"}
+
+    # Convert input to model format
+    prediction = model.predict([data.feature_vector])
+    return {"prediction": int(prediction[0])}  # Convert output to integer if needed
 
 def execute_command(
     command, train_path=None, test_path=None, model_path=None, save_path=None
@@ -49,8 +75,9 @@ def execute_command(
             )
             return
 
-        print("\n🎯 Entraînement du modèle...")
-        model = train_model(X_train, y_train)
+        n_neighbors = 5
+        print(f"\n🎯 Entraînement du modèle avec n_neighbors={n_neighbors}...")
+        model = train_model(X_train, y_train, n_neighbors)
         print("\n✅ Modèle entraîné avec succès")
         joblib.dump(model, "trained_model.pkl")
         print("\n✅ Modèle sauvegardé sous 'trained_model.pkl'")
@@ -91,7 +118,6 @@ def execute_command(
             return
 
         try:
-            # Load prepared data
             data = joblib.load("prepared_data.pkl")
             X_test = data["X_test"]
             y_test = data["y_test"]
@@ -115,11 +141,26 @@ def execute_command(
             print("\n📝 Classification Report:\n", report)
 
             # Log metrics to MLflow
+            mlflow.log_param(
+                "n_neighbors", model.n_neighbors
+            )  # Log the actual KNN value
             mlflow.log_metric("Accuracy", accuracy)
             mlflow.log_metric("Precision", precision)
             mlflow.log_metric("Recall", recall)
             mlflow.log_metric("F1-score", f1)
-            mlflow.sklearn.log_model(model, "model")
+
+            # Fix MLflow Warning: Add input example and signature
+            from mlflow.models.signature import infer_signature  # type: ignore
+            import pandas as pd
+
+            input_example = pd.DataFrame(
+                X_test[:1], columns=[f"feature_{i}" for i in range(X_test.shape[1])]
+            )
+            signature = infer_signature(X_test, model.predict(X_test))
+
+            mlflow.sklearn.log_model(
+                model, "model", input_example=input_example, signature=signature
+            )
 
     elif command == "save":
         if save_path:
@@ -161,6 +202,8 @@ def execute_command(
 
 
 if __name__ == "__main__":
+    import argparse
+
     parser = argparse.ArgumentParser(
         description="Pipeline de traitement de données et apprentissage automatique"
     )
@@ -177,10 +220,13 @@ if __name__ == "__main__":
     parser.add_argument("--save", type=str, help="Chemin pour sauvegarder le modèle")
     args = parser.parse_args()
 
-    execute_command(
-        args.command,
-        train_path=args.train,
-        test_path=args.test,
-        model_path=args.load,
-        save_path=args.save,
-    )
+    if args.command == "serve":
+        uvicorn.run(app, host="0.0.0.0", port=8000)
+    else:
+        execute_command(
+            args.command,
+            train_path=args.train,
+            test_path=args.test,
+            model_path=args.load,
+            save_path=args.save,
+        )

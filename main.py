@@ -10,10 +10,105 @@ from model_pipeline import (
 import joblib
 import mlflow  # type: ignore
 import mlflow.sklearn  # type: ignore
-
-mlflow.set_tracking_uri("http://localhost:5000")
+from fastapi import FastAPI # type: ignore
+from pydantic import BaseModel  # type: ignore
+import uvicorn  # type: ignore
+import mlflow   # type: ignore
+MLFLOW_TRACKING_URI = "http://172.17.81.48:5000"
+mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 mlflow.set_experiment("XGBoost Experiment")
+from elasticsearch import Elasticsearch # type: ignore
+import mlflow # type: ignore
+es = Elasticsearch(["http://localhost:9200"])
+ES_INDEX = "mlflow-metrics"
 
+
+app = FastAPI()
+from pydantic import BaseModel
+from typing import List
+
+class ModelInput(BaseModel):
+    feature_vector: List[float]  # Ensure feature vector contains numeric values
+
+import os
+import psycopg2
+from fastapi import FastAPI
+from pydantic import BaseModel
+from typing import List
+import joblib
+import uvicorn
+import mlflow
+import mlflow.sklearn
+from elasticsearch import Elasticsearch
+
+# Initialize FastAPI
+app = FastAPI()
+
+# Database connection setup
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/predictions_db")
+
+# Elasticsearch setup
+es = Elasticsearch(["http://localhost:9200"])
+ES_INDEX = "mlflow-metrics"
+
+# Define the ModelInput Pydantic model
+class ModelInput(BaseModel):
+    feature_vector: List[float]  # Ensure feature vector contains numeric values
+
+# DB connection function
+def get_db_connection():
+    conn = psycopg2.connect(DATABASE_URL)
+    return conn
+
+@app.get("/")
+def home():
+    return {"message": "FastAPI is running!"}
+
+@app.post("/predict")
+def predict(data: ModelInput):
+    try:
+        # Load the trained model
+        model = joblib.load("trained_model.pkl")
+    except FileNotFoundError:
+        return {"error": "Model not found. Train it first!"}
+
+    # Perform prediction
+    prediction = model.predict([data.feature_vector])
+
+    # Store the prediction result in the database
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO predictions (features, prediction) VALUES (%s, %s)",
+        (str(data.feature_vector), int(prediction[0]))
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    # Log to Elasticsearch
+    log_entry = {
+        "prediction": int(prediction[0]),
+        "features": data.feature_vector
+    }
+    es.index(index=ES_INDEX, body=log_entry)
+
+    return {"prediction": int(prediction[0])}
+
+@app.get("/")
+def home():
+    return {"message": "FastAPI is running!"}
+@app.post("/predict")
+def predict(data: ModelInput):
+    import joblib
+    try:
+        model = joblib.load("trained_model.pkl")  # Load trained model
+    except FileNotFoundError:
+        return {"error": "Model not found. Train it first!"}
+
+    # Convert input to model format
+    prediction = model.predict([data.feature_vector])
+    return {"prediction": int(prediction[0])}  # Convert output to integer if needed
 
 def execute_command(
     command, train_path=None, test_path=None, model_path=None, save_path=None
@@ -96,17 +191,13 @@ def execute_command(
             X_test = data["X_test"]
             y_test = data["y_test"]
         except FileNotFoundError:
-            print(
-                "\n⚠️ Les données préparées n'ont pas été trouvées. Exécutez 'prepare' d'abord."
-            )
+            print("\n⚠️ Les données préparées n'ont pas été trouvées. Exécutez 'prepare' d'abord.")
             return
 
         print("\n📊 Évaluation du modèle...")
 
         with mlflow.start_run():  # Start an MLflow run for evaluation
-            accuracy, precision, recall, f1, report = evaluate_model(
-                model, X_test, y_test
-            )
+            accuracy, precision, recall, f1, report = evaluate_model(model, X_test, y_test)
 
             print(f"\n✅ Précision: {accuracy}")
             print(f"🎯 Précision: {precision}")
@@ -115,16 +206,14 @@ def execute_command(
             print("\n📝 Classification Report:\n", report)
 
             # Log metrics to MLflow
-            mlflow.log_param(
-                "n_neighbors", model.n_neighbors
-            )  # Log the actual KNN value
+            mlflow.log_param("n_neighbors", model.n_neighbors)
             mlflow.log_metric("Accuracy", accuracy)
             mlflow.log_metric("Precision", precision)
             mlflow.log_metric("Recall", recall)
             mlflow.log_metric("F1-score", f1)
 
             # Fix MLflow Warning: Add input example and signature
-            from mlflow.models.signature import infer_signature  # type: ignore
+            from mlflow.models.signature import infer_signature
             import pandas as pd
 
             input_example = pd.DataFrame(
@@ -135,6 +224,23 @@ def execute_command(
             mlflow.sklearn.log_model(
                 model, "model", input_example=input_example, signature=signature
             )
+
+            # --- Send Metrics to Elasticsearch ---
+            log_entry = {
+                "experiment": "XGBoost Experiment",
+                "model": "KNN",
+                "n_neighbors": model.n_neighbors,
+                "metrics": {
+                    "accuracy": accuracy,
+                    "precision": precision,
+                    "recall": recall,
+                    "f1_score": f1,
+                }
+            }
+
+            es.index(index=ES_INDEX, body=log_entry)  # Send data to Elasticsearch
+            print("\n✅ Metrics logged to Elasticsearch")
+
 
     elif command == "save":
         if save_path:
@@ -176,6 +282,8 @@ def execute_command(
 
 
 if __name__ == "__main__":
+    import argparse
+
     parser = argparse.ArgumentParser(
         description="Pipeline de traitement de données et apprentissage automatique"
     )
@@ -192,10 +300,13 @@ if __name__ == "__main__":
     parser.add_argument("--save", type=str, help="Chemin pour sauvegarder le modèle")
     args = parser.parse_args()
 
-    execute_command(
-        args.command,
-        train_path=args.train,
-        test_path=args.test,
-        model_path=args.load,
-        save_path=args.save,
-    )
+    if args.command == "serve":
+        uvicorn.run(app, host="0.0.0.0", port=8000)
+    else:
+        execute_command(
+            args.command,
+            train_path=args.train,
+            test_path=args.test,
+            model_path=args.load,
+            save_path=args.save,
+        )
